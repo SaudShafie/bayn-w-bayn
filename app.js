@@ -114,31 +114,37 @@ function reveal(){const res=[];let sum=0,n=0;
 function final(players){const s=[...players].sort((a,b)=>b.score-a.score);
   app.innerHTML=`<div class="trophy">🏆</div><h1>${esc(s[0].name)} أخذها! 🔥</h1><div class="card">${s.map((p,i)=>`<div class="score"><span>${['🥇','🥈','🥉'][i]||'▫️'} <span class="dot" style="background:${p.color}"></span>${esc(p.name)}</span><b>${p.score}</b></div>`).join('')}</div><button class="big" onclick="home()">الرئيسية</button>`;}
 
-// ---------- الشبكة: سيرفر محلي (SSE) ← PeerJS (GitHub Pages) ← BroadcastChannel ----------
-const PEER_PREFIX='baynwbayn-room-';
-class Net{constructor(code,id,onMsg){this.code=code;this.id=id;this.on=onMsg;this.mode='';this.conns=new Map();this.q=[];this.closed=false;}
+// ---------- الشبكة: MQTT عام عبر WebSocket (أي مكان فيه نت) ← سيرفر محلي (SSE) ← BroadcastChannel ----------
+// المضيف يتصل بأول وسيط يشتغل، والجوالات تتصل بكل الوسطاء عشان تلقاه وين ما كان.
+const BROKERS=['wss://broker.emqx.io:8084/mqtt','wss://broker.hivemq.com:8884/mqtt','wss://test.mosquitto.org:8081/mqtt'];
+const TOPIC='baynwbayn/v1/';
+const waitLib=async ms=>{for(let t=0;!window.mqtt&&t<ms;t+=200)await new Promise(r=>setTimeout(r,200));return !!window.mqtt;};
+const rid=()=>Math.random().toString(36).slice(2,10);
+class Net{constructor(code,id,onMsg){this.code=code;this.id=id;this.on=onMsg;this.mode='';this.inst=rid();this.clients=[];this.closed=false;this.probing=false;this.taken=false;}
   get host(){return this.id==='host';}
-  async open(){try{const r=await fetch('/api/ping');if(r.ok&&(await r.text())==='ok')this.mode='server';}catch{}
+  async open(){
+    if(await waitLib(10000)){const ok=this.host?await this.openHost():await this.openPlayer();if(this.taken)throw new Error('taken');if(ok){this.mode='mqtt';return this;}}
+    try{const r=await fetch('/api/ping');if(r.ok&&(await r.text())==='ok')this.mode='server';}catch{}
     if(this.mode==='server'){this.es=new EventSource(`/api/events?code=${this.code}`);this.es.onmessage=e=>this.recv(JSON.parse(e.data));return this;}
-    if(window.Peer){const r=await this.openPeer();if(r==='taken')throw new Error('taken');if(r)return this;}
     this.mode='local';this.bc=new BroadcastChannel('bwb-'+this.code);this.bc.onmessage=e=>this.recv(e.data);return this;}
-  openPeer(){return new Promise(res=>{let opened=false;const done=v=>{if(!opened){opened=true;clearTimeout(t);res(v);}};const t=setTimeout(()=>{this.peer&&this.peer.destroy();done(false);},10000);
-    this.peer=new Peer(this.host?PEER_PREFIX+this.code:undefined,{debug:0});
-    this.peer.on('open',()=>{this.mode='peer';if(this.host)this.peer.on('connection',c=>this.bind(c));else this.connect();done(true);});
-    this.peer.on('disconnected',()=>{if(!this.closed&&!this.peer.destroyed)this.peer.reconnect();});
-    this.peer.on('error',e=>{if(!opened){this.peer.destroy();return done(e.type==='unavailable-id'?'taken':false);}
-      if(e.type==='peer-unavailable'&&!this.host&&!this.closed)setTimeout(()=>this.connect(),2500);});});}
-  connect(){if(this.closed)return;this.bind(this.peer.connect(PEER_PREFIX+this.code,{reliable:true}));}
-  bind(c){c.on('open',()=>{this.conns.set(c.peer,c);if(!this.host){const q=this.q;this.q=[];q.forEach(m=>c.send(m));}});
-    c.on('data',m=>{if(this.host&&m&&m.from)c.pid=m.from;this.recv(m);});
-    c.on('close',()=>{this.conns.delete(c.peer);if(!this.host&&!this.closed)setTimeout(()=>this.connect(),2000);});}
-  recv(m){if(!m||m.from===this.id)return;if(m.to&&m.to!==this.id)return;if(m.except&&m.except===this.id)return;this.on(m);}
-  close(){this.closed=true;this.es&&this.es.close();this.bc&&this.bc.close();this.peer&&this.peer.destroy();this.on=()=>{};}
+  broker(url,ms){return new Promise(res=>{const c=mqtt.connect(url,{clientId:'bwb_'+rid(),keepalive:30,reconnectPeriod:2000,connectTimeout:ms,clean:true});let done=false;
+    const t=setTimeout(()=>{if(!done){done=true;c.end(true);res(null);}},ms);
+    c.on('message',(_,p)=>{try{this.recv(JSON.parse(p.toString()));}catch{}});
+    c.on('connect',()=>c.subscribe(TOPIC+this.code,{qos:1},e=>{if(!done){done=true;clearTimeout(t);res(e?(c.end(true),null):c);}}));});}
+  async openHost(){for(const u of BROKERS){const c=await this.broker(u,8000);if(!c)continue;this.clients=[c];
+      this.probing=true;this.pub({type:'probe'});await new Promise(r=>setTimeout(r,1200));this.probing=false;
+      if(this.taken){c.end(true);this.clients=[];return false;}return true;}return false;}
+  openPlayer(){return new Promise(res=>{let left=BROKERS.length,done=false;
+    for(const u of BROKERS)this.broker(u,10000).then(c=>{left--;if(c){if(this.closed)return c.end(true);this.clients.push(c);if(!done){done=true;res(true);}}else if(!left&&!done)res(false);});});}
+  recv(m){if(!m||m.inst===this.inst)return;
+    if(m.type==='probe'){if(this.host&&!this.probing)this.pub({type:'here'});return;}
+    if(m.type==='here'){if(this.probing)this.taken=true;return;}
+    if(m.from===this.id&&!this.host)return;if(m.to&&m.to!==this.id)return;if(m.except&&m.except===this.id)return;this.on(m);}
+  pub(m){const s=JSON.stringify({...m,inst:this.inst});for(const c of this.clients)c.publish(TOPIC+this.code,s,{qos:1});}
+  close(){this.closed=true;this.es&&this.es.close();this.bc&&this.bc.close();this.clients.forEach(c=>c.end(true));this.clients=[];this.on=()=>{};}
   send(msg,to,except){const m={...msg,from:this.id,to,except};
-    if(this.mode==='server')fetch('/api/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:this.code,msg:m})});
-    else if(this.mode==='peer'){const open=[...this.conns.values()].filter(c=>c.open);
-      if(!this.host){if(open.length)open.forEach(c=>c.send(m));else this.q=[...this.q.slice(-20),m];return;}
-      for(const c of open)if((!to||c.pid===to)&&(!except||c.pid!==except))c.send(m);}
+    if(this.mode==='mqtt')this.pub(m);
+    else if(this.mode==='server')fetch('/api/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:this.code,msg:m})});
     else this.bc.postMessage(m);}}
 
 // ---------- المضيف (التلفزيون) ----------
@@ -191,8 +197,9 @@ function playerJoin(code){app.innerHTML=`<h1>بين وبين</h1><div class="car
     let id=sessionStorage.getItem('bwb_id');if(!id){id='p'+Math.random().toString(36).slice(2,9);sessionStorage.setItem('bwb_id',id);}
     PL={id,name:n,st:null,lastPhase:''};PL.net=await new Net(c,id,m=>{if(m.type==='state'){PL.st=m;playerDraw();}}).open();PL.net.send({type:'join',name:n});
     let tries=0;PL.ping=setInterval(()=>{if(!PL.st||!PL.st.players.some(p=>p.id===id)){PL.net.send({type:'join',name:n});
-      if(++tries===5&&$('#hint'))$('#hint').textContent=PL.net.mode==='local'?'ما فيه نت — تأكد إنك متصل وجرّب مرة ثانية':'ما لقينا الغرفة… تأكد من الكود وإن الغرفة مفتوحة (للحين نحاول)';}},2000);
-    if(!PL.st)app.innerHTML='<h2>لحظة ندخّلك...</h2><p class="center mut" id="hint"></p><button class="sec" onclick="location.reload()">رجوع</button>';};}
+      if(++tries===5&&$('#hint'))$('#hint').textContent=PL.net.mode==='local'?'ما قدرنا نتصل بخدمة الغرف — تأكد من النت واضغط «جرّب مرة ثانية»':`ما لقينا غرفة ${c}… تأكد من الكود وإن الشاشة فاتحة الغرفة من نفس الرابط (للحين نحاول)`;}},2000);
+    if(!PL.st){app.innerHTML=`<h2>لحظة ندخّلك...</h2><p class="center mut" id="hint"></p><button class="big" id="retry">جرّب مرة ثانية 🔄</button><button class="sec" onclick="location.href='index.html'">رجوع</button>`;
+      $('#retry').onclick=()=>{location.href='play.html?code='+encodeURIComponent(c);};}};}
 function playerDraw(){const s=PL.st,me=s.players.find(p=>p.id===PL.id);if(!me){app.innerHTML='<h2>لحظة ندخّلك...</h2>';return;}
   const giver=s.giverId===PL.id,done=s.guessed.includes(PL.id),waiting=s.phase==='guessing'&&(giver||done);
   const key=[s.phase,s.round,s.giverId,done,s.pair?.left,s.target,waiting?s.guessed.length:''].join('|');if(key===PL.lastPhase&&s.phase!=='lobby')return;PL.lastPhase=key;
