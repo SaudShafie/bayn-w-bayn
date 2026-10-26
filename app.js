@@ -38,7 +38,7 @@ function interactiveDial(el,opts,onChange){let ang=opts.angle??90;
   draw();return ()=>ang;}
 const endsHTML=p=>`<div class="center"><span class="cat">${esc(p.category)}</span></div><div class="ends"><div class="l">⬅ ${esc(p.left)}</div><div class="r">${esc(p.right)} ➡</div></div>`;
 function validClue(c,p){c=c.trim();if(!c)return'اكتب تلميح';if(/[0-9٠-٩۰-۹]/.test(c))return'ممنوع الأرقام';
-  for(const w of (p.left+' '+p.right).split(/\s+/))if(w.length>2&&c.includes(w))return`ممنوع تستخدم كلمة «${w}»`;if(c.split(/\s+/).length>5)return'خلّه قصير (٥ كلمات بالكثير)';return null;}
+  for(const w of (p.left+' '+p.right).split(/\s+/))if(w.length>2&&c.includes(w))return`ممنوع تستخدم كلمة «${w}»`;if(c.split(/\s+/).length>10)return'خلّه قصير (10 كلمات بالكثير)';return null;}
 
 // ---------- الشاشة الرئيسية ----------
 function home(){document.body.className='';const hs=LS.get('high',[]);
